@@ -1,0 +1,16 @@
+{
+  "name": "leadinfo-api",
+  "version": "1.0.0",
+  "main": "leadinfo-api.js",
+  "scripts": {
+    "start": "node leadinfo-api.js",
+    "dev": "node leadinfo-api.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "puppeteer": "^24.38.0"
+  }
+}

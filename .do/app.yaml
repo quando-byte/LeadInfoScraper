@@ -1,0 +1,25 @@
+# DigitalOcean App Platform spec
+# Deploy from GitHub: https://cloud.digitalocean.com/apps/new
+# Connect your repo and this spec will be used
+
+name: leadinfo-api
+services:
+  - name: api
+    github:
+      repo: YOUR_USERNAME/YOUR_REPO
+      branch: main
+      deploy_on_push: true
+    build_command: npm install
+    run_command: npm start
+    envs:
+      - key: NODE_ENV
+        value: production
+      - key: LEADINFO_EMAIL
+        type: SECRET
+      - key: LEADINFO_PASSWORD
+        type: SECRET
+      - key: LEADINFO_UK_ONLY
+        value: "true"
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs
