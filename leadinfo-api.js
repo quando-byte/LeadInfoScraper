@@ -34,7 +34,7 @@ const CONFIG = {
         'director', 'managing director', 'head of', 'vp', 'vice president',
         'manager', 'head', 'lead',
     ],
-    headless: process.env.NODE_ENV === 'production' ? 'new' : false,
+    headless: process.env.PUPPETEER_HEADLESS === 'false' ? false : 'new',
     timeout: 60000,
     delayBetweenCompanies: 800,
     delayBetweenContacts: 250,
@@ -135,7 +135,14 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-extensions',
+            '--no-first-run',
+            '--no-zygote',
             '--single-process',
+            '--memory-pressure-off',
+            '--js-flags=--max-old-space-size=256',
         ],
     });
 
@@ -553,7 +560,7 @@ app.post('/scrape', async (req, res) => {
             success: false,
             error: 'Scraping failed',
             code: 'SCRAPE_ERROR',
-            message: process.env.NODE_ENV === 'development' ? message : undefined,
+            message: (process.env.NODE_ENV === 'development' || process.env.DEBUG_SCRAPE === 'true') ? message : undefined,
         });
     }
 });

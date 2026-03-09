@@ -1,24 +1,39 @@
-# DigitalOcean App Platform spec
-# Deploy from GitHub: https://cloud.digitalocean.com/apps/new
-# Connect your repo and this spec will be used
-
 name: leadinfo-api
+region: lon # Based on your screenshot
 services:
   - name: api
     github:
       repo: quando-byte/LeadInfoScraper
       branch: main
       deploy_on_push: true
-    dockerfile_path: ./Dockerfile
+    
+    # CRITICAL: This triggers the Docker build process
+    dockerfile_path: Dockerfile
+    source_dir: /
+
+    # Resources
+    instance_count: 1
+    instance_size_slug: basic-xxs # $5.00/mo - 512MB RAM
+    
+    # Network configuration
+    http_port: 8080 
+    
+    # Environment Variables
     envs:
       - key: NODE_ENV
+        scope: RUN_TIME
         value: production
       - key: LEADINFO_EMAIL
+        scope: RUN_TIME
         type: SECRET
+        value: ${LEADINFO_EMAIL} # Reference existing secret or paste encrypted string
       - key: LEADINFO_PASSWORD
+        scope: RUN_TIME
         type: SECRET
+        value: ${LEADINFO_PASSWORD} # Reference existing secret or paste encrypted string
       - key: LEADINFO_UK_ONLY
+        scope: RUN_TIME
         value: "true"
-    http_port: 8080
-    instance_count: 1
-    instance_size_slug: basic-xxs
+      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
+        scope: RUN_AND_BUILD
+        value: "false"
