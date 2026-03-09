@@ -9,8 +9,6 @@ services:
       repo: YOUR_USERNAME/YOUR_REPO
       branch: main
       deploy_on_push: true
-    build_command: npm install
-    run_command: npm start
     envs:
       - key: NODE_ENV
         value: production
