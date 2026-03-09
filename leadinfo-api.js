@@ -27,7 +27,7 @@ const CONFIG = {
         signIn: 'button[type="submit"], [data-testid="sign-in"], .btn-primary',
     },
     inboxUrl: 'https://portal.leadinfo.com/inbox/today',
-    maxContactsPerCompany: 5,
+    maxContactsPerCompany: 20,
     ukOnly: process.env.LEADINFO_UK_ONLY !== 'false',
     titleKeywords: [
         'ceo', 'cto', 'cfo', 'coo', 'chief', 'owner', 'founder', 'partner',
@@ -185,9 +185,26 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
         await page.evaluateOnNewDocument(() => {
             document.addEventListener('click', (e) => {
                 const a = e.target.closest('a');
-                if (a && (a.href?.startsWith('mailto:') || a.href?.startsWith('tel:') || a.target === '_blank')) {
-                    e.preventDefault();
-                    e.stopPropagation();
+                if (a) {
+                    if (a.href?.startsWith('mailto:') || a.href?.startsWith('tel:')) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    } else if (a.target === '_blank') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                }
+            }, true);
+            document.addEventListener('mousedown', (e) => {
+                const a = e.target.closest('a');
+                if (a) {
+                    if (a.href?.startsWith('mailto:') || a.href?.startsWith('tel:')) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    } else if (a.target === '_blank') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
                 }
             }, true);
         });
@@ -336,11 +353,25 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
                             await delay(200);
 
                             await page.evaluate(() => {
-                                document.querySelectorAll('.dropdown-menu.show').forEach((m) => m.classList.remove('show'));
-                                if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+                                document.querySelectorAll('.dropdown-menu.show').forEach((m) => {
+                                    m.classList.remove('show');
+                                    m.querySelectorAll('a[href^="tel:"], a[href^="mailto:"], a[target="_blank"]').forEach((a) => {
+                                        a.removeAttribute('href');
+                                        a.removeAttribute('target');
+                                        a.style.pointerEvents = 'none';
+                                    });
+                                });
+                                if (document.activeElement && document.activeElement !== document.body) {
+                                    document.activeElement.blur();
+                                }
                             });
                             await page.keyboard.press('Escape');
                             await delay(300);
+
+                            await page.waitForFunction(
+                                () => !document.querySelector('.dropdown-menu.show'),
+                                { timeout: 2000 }
+                            ).catch(() => {});
 
                             const emailBtn = await block.evaluateHandle((el) => {
                                 const emailHints = ['email', 'mail', 'envelope'];
@@ -365,9 +396,13 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
                                         const menu = document.querySelector('.dropdown-menu.show');
                                         if (!menu) return '';
                                         let email = '';
-                                        for (const el of menu.querySelectorAll('span.text-truncate, [class*="truncate"]')) {
+                                        const sel = 'span.text-truncate, [class*="truncate"]';
+                                        for (const el of menu.querySelectorAll(sel)) {
                                             const t = (el.textContent || '').trim();
-                                            if (t && t.includes('@') && !/^get\s|^add\s|^request\s/i.test(t)) { email = t; break; }
+                                            if (t && t.includes('@') && !/^get\s|^add\s|^request\s/i.test(t)) {
+                                                email = t;
+                                                break;
+                                            }
                                         }
                                         if (!email) {
                                             const mailto = menu.querySelector('a[href^="mailto:"]');
@@ -376,6 +411,10 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
                                                 if (h && h.includes('@')) email = h;
                                             }
                                         }
+                                        menu.querySelectorAll('a[href^="mailto:"], a[href^="tel:"]').forEach((a) => {
+                                            a.removeAttribute('href');
+                                            a.style.pointerEvents = 'none';
+                                        });
                                         return email;
                                     });
                                     if (emailText) email = emailText;
@@ -411,9 +450,13 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
                                         const menu = document.querySelector('.dropdown-menu.show');
                                         if (!menu) return '';
                                         let phone = '';
-                                        for (const el of menu.querySelectorAll('span.text-truncate, [class*="truncate"]')) {
+                                        const sel = 'span.text-truncate, [class*="truncate"]';
+                                        for (const el of menu.querySelectorAll(sel)) {
                                             const t = (el.textContent || '').trim();
-                                            if (t && /^\+?[\d\s\-().]+$/.test(t.replace(/\s/g, ''))) { phone = t; break; }
+                                            if (t && /^\+?[\d\s\-().]+$/.test(t.replace(/\s/g, ''))) {
+                                                phone = t;
+                                                break;
+                                            }
                                         }
                                         if (!phone) {
                                             const tel = menu.querySelector('a[href^="tel:"]');
@@ -422,6 +465,14 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
                                                 if (h && /^\+?[\d\s\-().]+$/.test(h.replace(/\s/g, ''))) phone = h;
                                             }
                                         }
+                                        menu.querySelectorAll('a[href^="tel:"]').forEach((a) => {
+                                            a.removeAttribute('href');
+                                            a.style.pointerEvents = 'none';
+                                        });
+                                        menu.querySelectorAll('a[target="_blank"]').forEach((a) => {
+                                            a.removeAttribute('target');
+                                            a.style.pointerEvents = 'none';
+                                        });
                                         return phone;
                                     });
                                     if (phoneText) phone = phoneText;
