@@ -329,18 +329,26 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
                 let contactsForCompany = 0;
 
                 while (hasMorePages && contactsForCompany < CONFIG.maxContactsPerCompany) {
+                    // Leadinfo uses multiple layouts: div-based (legacy) or table-based (current)
                     let contactBlocks = await page.$$('#tab-company-contacts-tab .col-12.px-3.py-2');
                     if (contactBlocks.length === 0) {
                         contactBlocks = await page.$$('#tab-company-contacts-tab .row.no-gutters .col-12');
                     }
+                    if (contactBlocks.length === 0) {
+                        // Table layout: tbody tr rows containing contact-main
+                        contactBlocks = await page.$$('#tab-company-contacts-tab tbody tr[data-rbd-draggable-id]');
+                    }
+                    if (contactBlocks.length === 0) {
+                        contactBlocks = await page.$$('#tab-company-contacts-tab table tbody tr');
+                    }
 
                     for (const block of contactBlocks) {
                         try {
-                            const nameEl = await block.$('h6.text-dark');
+                            const nameEl = await block.$('h6.text-dark, h6[class*="text-dark"]');
                             const name = nameEl ? (await nameEl.evaluate((n) => n.textContent?.trim())) : '';
                             if (!name || !isStakeholderRow(name)) continue;
 
-                            const titleEl = await block.$('div.text-muted, [class*="_subtitle_"]');
+                            const titleEl = await block.$('div.text-muted, [class*="_subtitle_"], .text-muted.small');
                             const title = titleEl ? (await titleEl.evaluate((t) => t.textContent?.trim())) : '';
 
                             if (!matchesTitleFilter(title, CONFIG.titleKeywords)) continue;
@@ -348,6 +356,12 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
                             const { firstName, lastName } = parseName(name);
                             let email = '';
                             let phone = '';
+
+                            // Table layout: email may be in data-rbd-draggable-id (e.g. "eun.jung@hsbc.com")
+                            const draggableId = await block.evaluate((el) => el.getAttribute('data-rbd-draggable-id') || '');
+                            if (draggableId && draggableId.includes('@')) {
+                                email = draggableId.trim();
+                            }
 
                             await block.evaluate((el) => el.scrollIntoView({ block: 'center' }));
                             await delay(200);
@@ -388,7 +402,7 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
                             });
                             try {
                                 const emailBtnEl = emailBtn.asElement();
-                                if (emailBtnEl) {
+                                if (emailBtnEl && !email) {
                                     await emailBtnEl.click();
                                     await page.waitForSelector('.dropdown-menu.show', { timeout: 2000 }).catch(() => {});
                                     await delay(400);
