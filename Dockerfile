@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     libpangocairo-1.0-0 \
     libxshmfence1 \
+    libxkbcommon0 \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
