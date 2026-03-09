@@ -27,7 +27,7 @@ const CONFIG = {
         signIn: 'button[type="submit"], [data-testid="sign-in"], .btn-primary',
     },
     inboxUrl: 'https://portal.leadinfo.com/inbox/today',
-    maxContactsPerCompany: 20,
+    maxContactsPerCompany: 5,
     ukOnly: process.env.LEADINFO_UK_ONLY !== 'false',
     titleKeywords: [
         'ceo', 'cto', 'cfo', 'coo', 'chief', 'owner', 'founder', 'partner',
