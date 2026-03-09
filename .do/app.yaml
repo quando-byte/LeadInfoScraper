@@ -6,9 +6,10 @@ name: leadinfo-api
 services:
   - name: api
     github:
-      repo: YOUR_USERNAME/YOUR_REPO
+      repo: quando-byte/LeadInfoScraper
       branch: main
       deploy_on_push: true
+    dockerfile_path: Dockerfile
     envs:
       - key: NODE_ENV
         value: production
