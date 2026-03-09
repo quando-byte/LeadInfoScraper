@@ -4,7 +4,8 @@
   "main": "leadinfo-api.js",
   "scripts": {
     "start": "node leadinfo-api.js",
-    "dev": "node leadinfo-api.js"
+    "dev": "node leadinfo-api.js",
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -127,10 +127,16 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
     );
 
     const browser = await puppeteer.launch({
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
         headless: CONFIG.headless,
         defaultViewport: null,
         userDataDir,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--single-process',
+        ],
     });
 
     try {
