@@ -45,6 +45,14 @@ function normalizeCompanyName(name) {
     return String(name ?? '').trim().toLowerCase();
 }
 
+/** Normalize/validate Leadinfo company id */
+function normalizeCompanyId(id) {
+    const raw = String(id ?? '').trim();
+    if (!raw) return '';
+    const digitsOnly = raw.replace(/[^\d]/g, '');
+    return digitsOnly;
+}
+
 /** Check if two company names match (exact, case-insensitive) */
 function companyNameMatches(requested, actual) {
     const a = normalizeCompanyName(requested);
@@ -530,6 +538,371 @@ async function scrapeCompanyStakeholders(targetCompanyName) {
     }
 }
 
+/**
+ * Scrape stakeholder data for a specific company by Leadinfo companyId.
+ * This is much faster than scanning the Inbox to find a name match.
+ * @param {string|number} companyId
+ * @returns {Promise<{companyName: string, companyId: string, stakeholders: Array}>}
+ */
+async function scrapeCompanyStakeholdersById(companyId) {
+    const normalizedId = normalizeCompanyId(companyId);
+    if (!normalizedId) throw new Error('Invalid companyId');
+
+    const userDataDir = path.join(os.tmpdir(), `leadinfo-api-${Date.now()}`);
+    const prefsDir = path.join(userDataDir, 'Default');
+    fs.mkdirSync(prefsDir, { recursive: true });
+    fs.writeFileSync(
+        path.join(prefsDir, 'Preferences'),
+        JSON.stringify({ protocol_handler: { excluded_schemes: { mailto: true, tel: true } } }),
+        'utf8'
+    );
+
+    const browser = await puppeteer.launch({
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        headless: CONFIG.headless,
+        defaultViewport: null,
+        userDataDir,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-extensions',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--memory-pressure-off',
+            '--js-flags=--max-old-space-size=256',
+        ],
+    });
+
+    try {
+        const page = await browser.newPage();
+        page.setDefaultTimeout(CONFIG.timeout);
+
+        page.on('popup', async (popup) => { try { await popup.close(); } catch (_) {} });
+        browser.on('targetcreated', async (target) => {
+            try {
+                if (target.type() === 'page' && target !== page.target()) {
+                    const p = await target.page();
+                    if (p && p !== page) await p.close();
+                }
+            } catch (_) {}
+        });
+
+        await page.setRequestInterception(true);
+        page.on('request', async (req) => {
+            try {
+                const url = req.url();
+                if (url.startsWith('mailto:') || url.startsWith('tel:')) await req.abort();
+                else await req.continue();
+            } catch (_) {}
+        });
+
+        await page.evaluateOnNewDocument(() => {
+            const hideChat = () => {
+                document.querySelectorAll('[data-test-id="pill-launcher"], [aria-label="Open live chat"]').forEach((el) => {
+                    el.style.display = 'none';
+                    el.style.pointerEvents = 'none';
+                });
+            };
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', hideChat);
+            else hideChat();
+            const obs = new MutationObserver(hideChat);
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+        });
+
+        await page.evaluateOnNewDocument(() => {
+            document.addEventListener('click', (e) => {
+                const a = e.target.closest('a');
+                if (a) {
+                    if (a.href?.startsWith('mailto:') || a.href?.startsWith('tel:')) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    } else if (a.target === '_blank') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                }
+            }, true);
+            document.addEventListener('mousedown', (e) => {
+                const a = e.target.closest('a');
+                if (a) {
+                    if (a.href?.startsWith('mailto:') || a.href?.startsWith('tel:')) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    } else if (a.target === '_blank') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                }
+            }, true);
+        });
+
+        // 1. Login
+        await page.goto(CONFIG.loginUrl, { waitUntil: 'networkidle2', timeout: CONFIG.timeout });
+
+        const emailSelector = await page.$('input[type="email"], input[name="email"], #email').catch(() => null);
+        const passwordSelector = await page.$('input[type="password"], input[name="password"], #password').catch(() => null);
+
+        if (emailSelector && passwordSelector) {
+            await page.type('input[type="email"], input[name="email"], #email', CONFIG.credentials.email);
+            await page.type('input[type="password"], input[name="password"], #password', CONFIG.credentials.password);
+            await Promise.all([
+                page.waitForNavigation({ waitUntil: 'networkidle2', timeout: CONFIG.timeout }),
+                page.click('button[type="submit"], .btn-primary'),
+            ]);
+        } else {
+            await delay(5000);
+        }
+
+        // 2. Go straight to the company page by id
+        await page.goto(`${CONFIG.inboxUrl}/${normalizedId}`, { waitUntil: 'networkidle2', timeout: CONFIG.timeout });
+        await delay(1500);
+
+        if (CONFIG.ukOnly) {
+            const isUK = await isUKCompany(page);
+            if (!isUK) {
+                return { companyName: 'Unknown', companyId: normalizedId, stakeholders: [] };
+            }
+        }
+
+        let companyName = 'Unknown';
+        try {
+            companyName =
+                (await page.$eval('header h4', (el) => el?.textContent?.trim())) ||
+                (await page.$eval('h4.d-flex', (el) => el?.textContent?.trim())) ||
+                'Unknown';
+        } catch (_) {}
+
+        // 3. Click Contacts tab
+        let contactsTab = await page.$('#company-contacts-tab-header');
+        if (!contactsTab) {
+            const contactsSelector = await page.evaluate(() => {
+                const items = Array.from(document.querySelectorAll('li[id*="contacts"], [id*="contacts-tab"]'));
+                return items.length ? '#' + items[0].id : null;
+            });
+            if (contactsSelector) contactsTab = await page.$(contactsSelector);
+        }
+        if (!contactsTab) {
+            return { companyName, companyId: normalizedId, stakeholders: [] };
+        }
+        await contactsTab.click();
+        await delay(1500);
+
+        await page.evaluate(() => {
+            document.querySelectorAll('[data-test-id="pill-launcher"], [aria-label="Open live chat"]').forEach((el) => {
+                el.style.display = 'none';
+                el.style.pointerEvents = 'none';
+            });
+        });
+
+        await page.evaluate(() => {
+            const contacts = document.querySelector('#tab-company-contacts-tab');
+            if (contacts) {
+                contacts.addEventListener('click', (e) => {
+                    if (e.target.closest('a') && !e.target.closest('button')) e.preventDefault();
+                }, true);
+            }
+        });
+
+        const stakeholders = [];
+        let hasMorePages = true;
+        let contactsForCompany = 0;
+
+        while (hasMorePages && contactsForCompany < CONFIG.maxContactsPerCompany) {
+            let contactBlocks = await page.$$('#tab-company-contacts-tab .col-12.px-3.py-2');
+            if (contactBlocks.length === 0) {
+                contactBlocks = await page.$$('#tab-company-contacts-tab .row.no-gutters .col-12');
+            }
+            if (contactBlocks.length === 0) {
+                contactBlocks = await page.$$('#tab-company-contacts-tab tbody tr[data-rbd-draggable-id]');
+            }
+            if (contactBlocks.length === 0) {
+                contactBlocks = await page.$$('#tab-company-contacts-tab table tbody tr');
+            }
+
+            for (const block of contactBlocks) {
+                try {
+                    const nameEl = await block.$('h6.text-dark, h6[class*="text-dark"]');
+                    const name = nameEl ? (await nameEl.evaluate((n) => n.textContent?.trim())) : '';
+                    if (!name || !isStakeholderRow(name)) continue;
+
+                    const titleEl = await block.$('div.text-muted, [class*="_subtitle_"], .text-muted.small');
+                    const title = titleEl ? (await titleEl.evaluate((t) => t.textContent?.trim())) : '';
+
+                    if (!matchesTitleFilter(title, CONFIG.titleKeywords)) continue;
+
+                    const { firstName, lastName } = parseName(name);
+                    let email = '';
+                    let phone = '';
+
+                    const draggableId = await block.evaluate((el) => el.getAttribute('data-rbd-draggable-id') || '');
+                    if (draggableId && draggableId.includes('@')) {
+                        email = draggableId.trim();
+                    }
+
+                    await block.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+                    await delay(200);
+
+                    await page.evaluate(() => {
+                        document.querySelectorAll('.dropdown-menu.show').forEach((m) => {
+                            m.classList.remove('show');
+                            m.querySelectorAll('a[href^="tel:"], a[href^="mailto:"], a[target="_blank"]').forEach((a) => {
+                                a.removeAttribute('href');
+                                a.removeAttribute('target');
+                                a.style.pointerEvents = 'none';
+                            });
+                        });
+                        if (document.activeElement && document.activeElement !== document.body) {
+                            document.activeElement.blur();
+                        }
+                    });
+                    await page.keyboard.press('Escape');
+                    await delay(300);
+
+                    await page.waitForFunction(
+                        () => !document.querySelector('.dropdown-menu.show'),
+                        { timeout: 2000 }
+                    ).catch(() => {});
+
+                    const emailBtn = await block.evaluateHandle((el) => {
+                        const emailHints = ['email', 'mail', 'envelope'];
+                        let btn = Array.from(el.querySelectorAll('button.btn-link.options, button[class*="options"], button')).find((b) => {
+                            const img = b.querySelector('img');
+                            const src = (img?.getAttribute('src') || img?.getAttribute('alt') || '').toLowerCase();
+                            return emailHints.some((h) => src.includes(h));
+                        });
+                        if (!btn) {
+                            const img = el.querySelector('img[src*="email"], img[src*="mail"], img[alt*="email"]');
+                            if (img) btn = img.closest('button, [role="button"], a');
+                        }
+                        return btn;
+                    });
+                    try {
+                        const emailBtnEl = emailBtn.asElement();
+                        if (emailBtnEl && !email) {
+                            await emailBtnEl.click();
+                            await page.waitForSelector('.dropdown-menu.show', { timeout: 2000 }).catch(() => {});
+                            await delay(400);
+                            const emailText = await page.evaluate(() => {
+                                const menu = document.querySelector('.dropdown-menu.show');
+                                if (!menu) return '';
+                                let email = '';
+                                const sel = 'span.text-truncate, [class*="truncate"]';
+                                for (const el of menu.querySelectorAll(sel)) {
+                                    const t = (el.textContent || '').trim();
+                                    if (t && t.includes('@') && !/^get\s|^add\s|^request\s/i.test(t)) {
+                                        email = t;
+                                        break;
+                                    }
+                                }
+                                if (!email) {
+                                    const mailto = menu.querySelector('a[href^="mailto:"]');
+                                    if (mailto) {
+                                        const h = (mailto.getAttribute('href') || '').replace(/^mailto:/i, '').split('?')[0].trim();
+                                        if (h && h.includes('@')) email = h;
+                                    }
+                                }
+                                menu.querySelectorAll('a[href^="mailto:"], a[href^="tel:"]').forEach((a) => {
+                                    a.removeAttribute('href');
+                                    a.style.pointerEvents = 'none';
+                                });
+                                return email;
+                            });
+                            if (emailText) email = emailText;
+                            await page.keyboard.press('Escape');
+                            await delay(500);
+                        }
+                    } finally {
+                        emailBtn.dispose();
+                    }
+
+                    await delay(200);
+
+                    const phoneBtn = await block.evaluateHandle((el) => {
+                        const phoneHints = ['phone', 'call', 'tel'];
+                        let btn = Array.from(el.querySelectorAll('button.btn-link.options, button[class*="options"], button')).find((b) => {
+                            const img = b.querySelector('img');
+                            const src = (img?.getAttribute('src') || img?.getAttribute('alt') || '').toLowerCase();
+                            return phoneHints.some((h) => src.includes(h));
+                        });
+                        if (!btn) {
+                            const img = el.querySelector('img[src*="phone"], img[src*="call"], img[alt*="phone"]');
+                            if (img) btn = img.closest('button, [role="button"], a');
+                        }
+                        return btn;
+                    });
+                    try {
+                        const phoneBtnEl = phoneBtn.asElement();
+                        if (phoneBtnEl) {
+                            await phoneBtnEl.click();
+                            await page.waitForSelector('.dropdown-menu.show', { timeout: 2000 }).catch(() => {});
+                            await delay(400);
+                            const phoneText = await page.evaluate(() => {
+                                const menu = document.querySelector('.dropdown-menu.show');
+                                if (!menu) return '';
+                                let phone = '';
+                                const sel = 'span.text-truncate, [class*="truncate"]';
+                                for (const el of menu.querySelectorAll(sel)) {
+                                    const t = (el.textContent || '').trim();
+                                    if (t && /^\+?[\d\s\-().]+$/.test(t.replace(/\s/g, ''))) {
+                                        phone = t;
+                                        break;
+                                    }
+                                }
+                                if (!phone) {
+                                    const tel = menu.querySelector('a[href^="tel:"]');
+                                    if (tel) {
+                                        const h = (tel.getAttribute('href') || '').replace(/^tel:/i, '').trim();
+                                        if (h && /^\+?[\d\s\-().]+$/.test(h.replace(/\s/g, ''))) phone = h;
+                                    }
+                                }
+                                menu.querySelectorAll('a[href^="tel:"]').forEach((a) => {
+                                    a.removeAttribute('href');
+                                    a.style.pointerEvents = 'none';
+                                });
+                                menu.querySelectorAll('a[target="_blank"]').forEach((a) => {
+                                    a.removeAttribute('target');
+                                    a.style.pointerEvents = 'none';
+                                });
+                                return phone;
+                            });
+                            if (phoneText) phone = phoneText;
+                            await page.keyboard.press('Escape');
+                            await delay(500);
+                        }
+                    } finally {
+                        phoneBtn.dispose();
+                    }
+
+                    stakeholders.push({ firstName, lastName, title, email, phone });
+                    contactsForCompany++;
+                    if (contactsForCompany >= CONFIG.maxContactsPerCompany) break;
+                } catch (_) {}
+            }
+
+            if (contactsForCompany >= CONFIG.maxContactsPerCompany) break;
+
+            const clickedNext = await page.evaluate(() => {
+                const nextBtn = Array.from(document.querySelectorAll('button')).find((b) => b.textContent?.trim() === 'Next' && !b.disabled);
+                if (nextBtn) { nextBtn.click(); return true; }
+                return false;
+            });
+            if (clickedNext) {
+                await delay(1500);
+            } else {
+                hasMorePages = false;
+            }
+        }
+
+        return { companyName, companyId: normalizedId, stakeholders };
+    } finally {
+        await browser.close();
+    }
+}
+
 // --- Express API ---
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -552,9 +925,22 @@ app.post('/scrape', async (req, res) => {
             });
         }
 
+        const companyId = body.companyId ?? body.company_id ?? body.id;
         const companyName = body.companyName ?? body.company_name ?? body.company;
 
-        if (!companyName || typeof companyName !== 'string') {
+        const normalizedId = companyId != null ? normalizeCompanyId(companyId) : '';
+        const trimmedName = companyName != null ? String(companyName).trim() : '';
+
+        if (!normalizedId && !trimmedName) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing company identifier. Provide either companyId (preferred) or companyName.',
+                code: 'MISSING_COMPANY_IDENTIFIER',
+                expected: { companyId: '4410987' },
+            });
+        }
+
+        if (!normalizedId && (typeof companyName !== 'string' || trimmedName.length === 0)) {
             return res.status(400).json({
                 success: false,
                 error: 'Missing or invalid companyName. Expected: { "companyName": "Your Company Ltd" }',
@@ -562,12 +948,11 @@ app.post('/scrape', async (req, res) => {
             });
         }
 
-        const trimmed = String(companyName).trim();
-        if (trimmed.length === 0) {
+        if (normalizedId && !/^\d{4,}$/.test(normalizedId)) {
             return res.status(400).json({
                 success: false,
-                error: 'companyName cannot be empty',
-                code: 'EMPTY_COMPANY_NAME',
+                error: 'Invalid companyId. Expected digits like "4410987".',
+                code: 'INVALID_COMPANY_ID',
             });
         }
 
@@ -579,14 +964,16 @@ app.post('/scrape', async (req, res) => {
             });
         }
 
-        const result = await scrapeCompanyStakeholders(trimmed);
+        const result = normalizedId
+            ? await scrapeCompanyStakeholdersById(normalizedId)
+            : await scrapeCompanyStakeholders(trimmedName);
 
         if (result === null) {
             return res.status(404).json({
                 success: false,
-                error: `Company not found: "${trimmed}"`,
+                error: `Company not found: "${trimmedName}"`,
                 code: 'COMPANY_NOT_FOUND',
-                requestedCompanyName: trimmed,
+                requestedCompanyName: trimmedName,
             });
         }
 
